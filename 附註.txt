@@ -1,0 +1,13 @@
+兄弟 你要開兩個node.js
+
+第一個頁面要先 (app端)
+cd 你檔案的路徑\APP
+npx expo start
+
+第二個頁面要先 (網路層和資料庫部分)
+cd 你檔案的路徑\server 
+npm run dev
+
+喔對
+EXPO_PUBLIC_API_BASE_URL=http://192.168.0.141:3000/api <-改成你網路的ip
+網路ip你用ipconfig抓
