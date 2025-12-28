@@ -13,7 +13,7 @@ import { Platform } from 'react-native';
 
 function defaultBaseUrl() {
   // 預設值：沿用你原本的區網 IP（你可以改成自己的）
-  const LAN_IP = '192.168.20.105';
+  const LAN_IP = '192.168.20.104';
   const port = 3000;
 
   // 如果你在跑模擬器，這兩個會比較常用

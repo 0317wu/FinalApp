@@ -2,6 +2,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { apiGet, apiPost, apiPut, createWebSocketConnection } from '../services/api';
 import { formatDateLabel } from '../utils/timeUtils';
+import { Accelerometer } from 'expo-sensors';
+import * as Battery from 'expo-battery';
 
 const DataContext = createContext(null);
 
@@ -23,6 +25,11 @@ export function DataProvider({ children }) {
   const [sensorLastError, setSensorLastError] = useState(null);
   const sensorTimerRef = useRef(null);
   const wsRef = useRef(null);
+  const accelerometerSubRef = useRef(null);
+  const batteryTimerRef = useRef(null);
+  const lastAccelMagRef = useRef(null);
+  const currentVibrationRef = useRef(0);
+  const batteryLevelRef = useRef(80);
 
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState(null);
@@ -257,11 +264,17 @@ export function DataProvider({ children }) {
   const stopSensor = useCallback(() => {
     try {
       if (sensorTimerRef.current) clearInterval(sensorTimerRef.current);
+      if (batteryTimerRef.current) clearInterval(batteryTimerRef.current);
+      if (accelerometerSubRef.current) {
+        accelerometerSubRef.current.remove();
+      }
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.close();
       }
     } catch {}
     sensorTimerRef.current = null;
+    batteryTimerRef.current = null;
+    accelerometerSubRef.current = null;
     wsRef.current = null;
     setSensorRunning(false);
   }, []);
@@ -276,6 +289,42 @@ export function DataProvider({ children }) {
 
       setSensorLastError(null);
       setSensorRunning(true);
+
+      // 啟用加速度計：用變化量估算 vibration (0~1)
+      try {
+        const accelInterval = Math.max(100, Math.floor((Number(intervalMs) || 3000) / 3));
+        Accelerometer.setUpdateInterval(accelInterval);
+        accelerometerSubRef.current = Accelerometer.addListener(({ x, y, z }) => {
+          const mag = Math.sqrt((x || 0) * (x || 0) + (y || 0) * (y || 0) + (z || 0) * (z || 0));
+          const prev = lastAccelMagRef.current;
+          lastAccelMagRef.current = mag;
+          if (prev != null) {
+            // 以相鄰樣本的差值作為震動強度，粗略正規化至 0~1
+            const delta = Math.abs(mag - prev);
+            const normalized = Math.min(1, Math.max(0, delta / 3));
+            currentVibrationRef.current = Number(normalized.toFixed(3));
+          }
+        });
+      } catch (e) {
+        console.warn('Accelerometer subscription failed:', e);
+      }
+
+      // 啟用電量讀取（每 60 秒更新一次）
+      try {
+        const refreshBattery = async () => {
+          try {
+            const level = await Battery.getBatteryLevelAsync(); // 0~1
+            if (typeof level === 'number' && !Number.isNaN(level)) {
+              batteryLevelRef.current = Math.round(level * 100);
+            }
+          } catch {}
+        };
+        // 立即讀一次
+        refreshBattery();
+        batteryTimerRef.current = setInterval(refreshBattery, 60000);
+      } catch (e) {
+        console.warn('Battery read failed:', e);
+      }
 
       // 建立 WebSocket 連接
       try {
@@ -318,36 +367,34 @@ export function DataProvider({ children }) {
 
       // 先送一筆，避免等第一個 interval
       const sendOnce = async () => {
+        const nowIso = new Date().toISOString();
+        const vib = currentVibrationRef.current || 0;
+        const battery = batteryLevelRef.current || 80;
         const payload = {
-          ts: new Date().toISOString(),
-          vibration: Number((Math.random() * 1.0).toFixed(3)),
-          door: Math.random() > 0.85 ? 'OPEN' : 'CLOSED',
-          battery: Math.floor(60 + Math.random() * 40),
+          ts: nowIso,
+          vibration: Number(Number(vib).toFixed(3)),
+          door: 'CLOSED',
+          battery: Number(battery),
         };
-        
-        // 檢查是否有異常：震動過大或異常開門
+
+        // 異常檢查：僅以震動為準
         const hasVibrationAlert = payload.vibration > 0.7;
-        const hasDoorAlert = payload.door === 'OPEN';
-        const isAbnormal = hasVibrationAlert || hasDoorAlert;
-        
+        const isAbnormal = hasVibrationAlert;
+
         const ok = await sendSensorReading({ boxId: sensorBoundBoxId, deviceId, payload });
         if (!ok) {
           setSensorLastError('送出感測資料失敗（請檢查 WebSocket 連線）');
           return;
         }
-        
+
         // 如果偵測到異常，記錄 ALERT 事件
         if (isAbnormal) {
-          const alertNote = [];
-          if (hasVibrationAlert) alertNote.push(`震動異常 (${payload.vibration})`);
-          if (hasDoorAlert) alertNote.push('偵測到開門');
-          
+          const alertNote = [`震動異常 (${payload.vibration})`];
           const eventLogged = await logEvent({
             boxId: sensorBoundBoxId,
             type: 'ALERT',
             note: `感測器異常：${alertNote.join('、')}`,
           });
-          
           if (eventLogged) {
             const now = new Date().toISOString();
             setLastAlertDetectedAt(now);
